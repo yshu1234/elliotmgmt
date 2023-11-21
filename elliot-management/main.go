@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,23 @@ import (
 
 var hosts = []string{"elliottmgmt.com"}
 
+type EndpointDataInfo struct {
+	Details struct {
+		Cert struct {
+			NotBefore            float64  `json:"notBefore"`
+			NotAfter             float64  `json:"notAfter"`
+			CommonNames          []string `json:"commonNames"`
+			AlterNativeNames     []string `json:"altNames"`
+			SigAlg               string   `json:"sigAlg"`
+			IssuerLabel          string   `json:"issuerLabel"`
+			CrlRevocationStatus  float64  `json:"crlRevocationStatus"`
+			OcspRevocationStatus float64  `json:"ocspRevocationStatus"`
+		} `json:"cert"`
+	} `json:"details"`
+}
+
 func GetAnalyze(host string) ([]byte, error) {
+	// LOG: Analyzing endpoint
 	resp, err := http.Get("https://api.ssllabs.com/api/v2/analyze?host=" + host)
 	if nil != err {
 		println("Request Error:")
@@ -47,94 +64,85 @@ func GetEndpointData(ip string) ([]byte, error) {
 	return body, nil
 }
 
+func GetIPAddress(host string) (string, error) {
+	// LOG: Retrieving Analyze address payload
+	resp, err := GetAnalyze(host)
+	if err != nil {
+		return "", err
+	}
+	payload_to_response := make(map[string]interface{})
+	json.Unmarshal(resp, &payload_to_response)
+	//LOG: Parsed Analyze address payload
+
+	type AnalyzePayload struct {
+		Host      string                   `json:"host"`
+		Status    string                   `json:"status"`
+		StartTime float64                  `json:"startTime"`
+		Endpoint  []map[string]interface{} `json:"endpoints"`
+	}
+
+	var st AnalyzePayload
+	json.Unmarshal(resp, &st)
+	if len(st.Endpoint) < 1 {
+		return "", errors.New("No endpoints found in analyze payload. Rerunning once usually fixes this.")
+	}
+
+	ipAddress, ok := st.Endpoint[0]["ipAddress"].(string)
+	if !ok {
+		return "", errors.New("No ip address listed in payload.  Rerunning once usually fixes this.")
+	}
+	return ipAddress, nil
+}
+
+func ConstructReport(endpointDataInfo EndpointDataInfo) string {
+	var certificateValidity string
+	var ocspRevocationStatusInt int = int(endpointDataInfo.Details.Cert.OcspRevocationStatus)
+	var crlRevocationStatusInt int = int(endpointDataInfo.Details.Cert.CrlRevocationStatus)
+
+	// LOG: CRLRevocationStatus: crlRevocationStatus  OCSPRevocationStatus: ocspRevocationStatus
+	if (crlRevocationStatusInt == 2 && ocspRevocationStatusInt == 4) || (crlRevocationStatusInt == 4 && ocspRevocationStatusInt == 2) {
+		certificateValidity = "Certificate Valid\n"
+	} else {
+		certificateValidity = "Certificate Invalid\n" +
+			"OCSP Revocation Status: " + fmt.Sprint(ocspRevocationStatusInt) + "\n" +
+			"CRL Revocation Status" + fmt.Sprint(crlRevocationStatusInt) + "\n"
+	}
+	var startTimeUnixInt int64 = int64(endpointDataInfo.Details.Cert.NotBefore)
+	var endTimeUnixInt int64 = int64(endpointDataInfo.Details.Cert.NotAfter)
+	startTimeUnixTime := time.Unix(startTimeUnixInt, 0)
+	endTimeUnixTime := time.Unix(endTimeUnixInt, 0)
+	//LOG: All Info Assembled
+
+	report := "Attempting to verify certificate for elliotmgmt.com\n" +
+		certificateValidity +
+		"Issuer: " + endpointDataInfo.Details.Cert.IssuerLabel + "\n" +
+		"Valid from: " + startTimeUnixTime.Format(time.RFC850) + "\n" +
+		"Valid until: " + endTimeUnixTime.Format(time.RFC850) + "\n" +
+		"Common Names: " + strings.Join(endpointDataInfo.Details.Cert.CommonNames, ",") + "\n" +
+		"Alternate Names: " + strings.Join(endpointDataInfo.Details.Cert.AlterNativeNames, ",") + "\n" +
+		"Signature Algorithim: " + endpointDataInfo.Details.Cert.SigAlg + "\n"
+
+	return report
+}
 func main() {
 	for _, host := range hosts {
-		resp, err := GetAnalyze(host)
+		//LOG: Retrieving host info for: "host"
+		ipAddress, err := GetIPAddress(host)
 		if err != nil {
 			fmt.Println(err)
-			return
+			continue
 		}
-		//LOG: Retrieved IP address payload
-		payload_to_response := make(map[string]interface{})
-		json.Unmarshal(resp, &payload_to_response)
-		//LOG: Parsed IP address payload
-
-		type AnalyzePayload struct {
-			Host      string                   `json:"host"`
-			Status    string                   `json:"status"`
-			StartTime float64                  `json:"startTime"`
-			Endpoint  []map[string]interface{} `json:"endpoints"`
-		}
-
-		var st AnalyzePayload
-		json.Unmarshal(resp, &st)
-		if len(st.Endpoint) < 1 {
-			return
-		}
-
-		ipAddress, ok := st.Endpoint[0]["ipAddress"].(string)
-		if !ok {
-			return
-		}
-		//LOG: IP address: + ipAddress
-
-		resp, err = GetEndpointData(ipAddress)
+		//LOG: IP address: "ipAddress"
+		resp, err := GetEndpointData(ipAddress)
 		if err != nil {
 			return
 		}
-		json.Unmarshal(resp, &payload_to_response)
 
-		//LOG: PARSING EndpointData PAYLOAD
-		startTimeUnix := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["notBefore"].(float64)
-		endTimeUnix := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["notAfter"].(float64)
-		// rsaSize := payload_to_response["details"].(map[string]interface{})["key"].(map[string]interface{})["size"].(float64)
-		// alg := payload_to_response["details"].(map[string]interface{})["key"].(map[string]interface{})["alg"].(string)
+		var endpointDataInfo EndpointDataInfo
+		// //LOG: PARSING EndpointData PAYLOAD
+		json.Unmarshal(resp, &endpointDataInfo)
 
-		names := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["commonNames"].([]interface{})
-		names_str := make([]string, 0, len(names))
-		for _, name := range names {
-			names_str = append(names_str, name.(string))
-		}
-
-		alternative_names := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["altNames"].([]interface{})
-		alternative_names_str := make([]string, 0, len(alternative_names))
-		for _, name := range alternative_names {
-			alternative_names_str = append(alternative_names_str, name.(string))
-		}
-
-		sigAlg := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["sigAlg"].(string)
-		issuer := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["issuerLabel"].(string)
-		crlRevocationStatus := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["crlRevocationStatus"].(float64)
-		ocspRevocationStatus := payload_to_response["details"].(map[string]interface{})["cert"].(map[string]interface{})["ocspRevocationStatus"].(float64)
-		//LOG: EndpointData Payload Parsed
-
-		var certificateValidity string
-		var ocspRevocationStatusInt int = int(ocspRevocationStatus)
-		var crlRevocationStatusInt int = int(crlRevocationStatus)
-
-		// LOG: CRLRevocationStatus: crlRevocationStatus  OCSPRevocationStatus: ocspRevocationStatus
-		if (crlRevocationStatus == 2 && ocspRevocationStatus == 4) || (crlRevocationStatus == 4 && ocspRevocationStatus == 2) {
-			certificateValidity = "Certificate Valid\n"
-		} else {
-			certificateValidity = "Certificate Invalid\n" +
-				"OCSP Revocation Status: " + fmt.Sprint(ocspRevocationStatusInt) + "\n" +
-				"CRL Revocation Status" + fmt.Sprint(crlRevocationStatusInt) + "\n"
-		}
-		var startTimeUnixInt int64 = int64(startTimeUnix)
-		var endTimeUnixInt int64 = int64(endTimeUnix)
-		startTimeUnixTime := time.Unix(startTimeUnixInt, 0)
-		endTimeUnixTime := time.Unix(endTimeUnixInt, 0)
-		//LOG: All Info Assembled
-
-		report := "Attempting to verify certificate for elliotmgmt.com\n" +
-			certificateValidity +
-			"Issuer: " + issuer + "\n" +
-			"Valid from: " + startTimeUnixTime.Format(time.RFC850) + "\n" +
-			"Valid until: " + endTimeUnixTime.Format(time.RFC850) + "\n" +
-			"Common Names: " + strings.Join(names_str, ",") + "\n" +
-			"Alternate Names: " + strings.Join(alternative_names_str, ",") + "\n" +
-			"Signature Algorithim: " + sigAlg + "\n"
-
+		report := ConstructReport(endpointDataInfo)
 		//LOG: Report Assembled
 		print(report)
 	}
