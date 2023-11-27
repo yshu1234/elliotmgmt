@@ -12,6 +12,10 @@ import (
 
 var hosts = []string{"elliottmgmt.com"}
 
+const retry_attempts = 5
+const endpointDataAddress = "https://api.ssllabs.com/api/v2/getEndpointData?host=elliottmgmt.com&s="
+const analyzeDataAddress = "https://api.ssllabs.com/api/v2/analyze?host="
+
 type EndpointDataInfo struct {
 	Details struct {
 		Cert struct {
@@ -27,32 +31,24 @@ type EndpointDataInfo struct {
 	} `json:"details"`
 }
 
-func GetAnalyze(host string) ([]byte, error) {
-	// LOG: Analyzing endpoint
-	resp, err := http.Get("https://api.ssllabs.com/api/v2/analyze?host=" + host)
-	if nil != err {
-		println("Request Error:")
-		println(err.Error())
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if nil != err {
-		println("Read Error:")
-		println(err.Error())
-		return nil, err
+func retryHttpGetCall(endpoint string) (*http.Response, error) {
+	var err error
+	for retry_attempt := 0; retry_attempt < retry_attempts; retry_attempt += 1 {
+		resp, err := http.Get(endpoint)
+		if nil == err {
+			return resp, nil
+		}
 	}
 
-	return body, nil
+	return nil, err
 }
 
-func GetEndpointData(ip string) ([]byte, error) {
-	resp, err := http.Get("https://api.ssllabs.com/api/v2/getEndpointData?host=elliottmgmt.com&s=" + ip)
-	if nil != err {
-		println("Request Error:")
-		println(err.Error())
+func GetAndReadPayload(address string) ([]byte, error) {
+	resp, err := retryHttpGetCall(address)
+	if err != nil {
 		return nil, err
 	}
+
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if nil != err {
@@ -66,7 +62,7 @@ func GetEndpointData(ip string) ([]byte, error) {
 
 func GetIPAddress(host string) (string, error) {
 	// LOG: Retrieving Analyze address payload
-	resp, err := GetAnalyze(host)
+	resp, err := GetAndReadPayload(host)
 	if err != nil {
 		return "", err
 	}
@@ -124,16 +120,17 @@ func ConstructReport(endpointDataInfo EndpointDataInfo) string {
 
 	return report
 }
+
 func main() {
 	for _, host := range hosts {
 		//LOG: Retrieving host info for: "host"
-		ipAddress, err := GetIPAddress(host)
+		ipAddress, err := GetIPAddress(analyzeDataAddress + host)
 		if err != nil {
 			fmt.Println(err)
 			continue
 		}
 		//LOG: IP address: "ipAddress"
-		resp, err := GetEndpointData(ipAddress)
+		resp, err := GetAndReadPayload(endpointDataAddress + ipAddress)
 		if err != nil {
 			return
 		}
